@@ -1,20 +1,21 @@
 import streamlit as st
 import pandas as pd
 import io
-import math
 from docx import Document
 
 # --- PARSING ENGINE FOR SECTIONS 6, 7, and 8 ---
 
 def parse_survey_tables(doc):
     """
-    Accurately parses Sections 6, 7, and 8 from the uploaded Word document tables.
-    Extracts item descriptions and quantities written by the technician.
+    Parses Sections 6, 7, and 8 from the uploaded Word document tables.
+    Extracts item descriptions and quantities written by the technician strictly without assumptions.
     """
     extracted_items = []
-    
     current_section = None
+    
     for table in doc.tables:
+        if not table.rows:
+            continue
         first_row_text = "".join([cell.text.strip() for cell in table.rows[0].cells]).upper()
         
         if "6. NEW SYSTEM REQUIREMENTS" in first_row_text:
@@ -26,7 +27,6 @@ def parse_survey_tables(doc):
         elif "9. SITE OBSERVATIONS" in first_row_text or "10. SIGN-OFF" in first_row_text:
             current_section = None
             
-        # If we are inside Sections 6, 7, or 8, parse the rows
         if current_section in [6, 7, 8]:
             for row in table.rows[1:]: # Skip header
                 cells = [cell.text.strip() for cell in row.cells]
@@ -35,61 +35,79 @@ def parse_survey_tables(doc):
                     description = cells[2]
                     qty_str = cells[3]
                     
-                    if item_name or description:
+                    if item_name and qty_str:
                         try:
-                            qty = float(qty_str) if qty_str else 0.0
+                            qty = float(qty_str)
                         except ValueError:
                             qty = 0.0
                             
-                        extracted_items.append({
-                            "Section": current_section,
-                            "Item": item_name,
-                            "Description": description,
-                            "Qty": qty,
-                            "Unit": cells[4] if len(cells) > 4 else "EA"
-                        })
+                        if qty > 0:
+                            extracted_items.append({
+                                "Section": current_section,
+                                "Item": item_name,
+                                "Description": description,
+                                "Qty": qty,
+                                "Unit": cells[4] if len(cells) > 4 else "EA"
+                            })
                         
     return extracted_items
 
 
-# --- EXCEL BOQ GENERATOR MATCHING MASTER TEMPLATE ---
+# --- EXCEL BOQ GENERATOR MATCHING MASTER TEMPLATE STRICTLY ---
 
 def generate_master_boq_excel(survey_items):
     """
-    Generates an Excel file matching the exact structure of POT27605 - BOQ-1 LVQ.xlsx
-    with sheets: BOQ, BD, Storage, UPS.
+    Generates an Excel file matching the template structure, populated 
+    ONLY with items and quantities explicitly extracted from the survey.
     """
     output = io.BytesIO()
-    
-    # 1. Build BOQ DataFrame matching template structure
     boq_rows = []
     
-    # Section A: Cameras and accessories
-    boq_rows.append([None, "A", "Cameras and accessories", None, None, None, None, None, None, None, None, None, None, ""])
+    # Filter items by category
+    camera_items = [item for item in survey_items if item['Section'] == 6 and ("cctv" in item['Item'].lower() or "camera" in item['Item'].lower() or "coverage" in item['Item'].lower())]
+    nvr_items = [item for item in survey_items if item['Section'] == 6 and ("recording" in item['Item'].lower() or "nvr" in item['Item'].lower() or "server" in item['Item'].lower())]
+    storage_items = [item for item in survey_items if item['Section'] == 6 and ("storage" in item['Item'].lower() or "retention" in item['Item'].lower())]
+    network_items = [item for item in survey_items if item['Section'] == 6 and ("network" in item['Item'].lower() or "switch" in item['Item'].lower())]
+    workstation_items = [item for item in survey_items if item['Section'] == 6 and ("monitoring" in item['Item'].lower() or "workstation" in item['Item'].lower())]
+    ups_items = [item for item in survey_items if item['Section'] == 6 and ("power" in item['Item'].lower() or "ups" in item['Item'].lower())]
+    vms_items = [item for item in survey_items if item['Section'] == 6 and ("vms" in item['Item'].lower() or "software" in item['Item'].lower())]
     
-    dome_qty = sum([item['Qty'] for item in survey_items if "dome" in item['Item'].lower() or "dome" in item['Description'].lower()])
-    bullet_qty = sum([item['Qty'] for item in survey_items if "bullet" in item['Item'].lower() or "bullet" in item['Description'].lower()])
-    
-    if dome_qty == 0: dome_qty = 10 # Default fallback if blank
-    if bullet_qty == 0: bullet_qty = 8
-    
-    boq_rows.append([None, 1, "Dome Camera - Fixed\n2MP Dome Camera", "EA", dome_qty, 0, 0, 0, 0, 200, dome_qty * 200, 232.0, dome_qty * 232.0, None])
-    boq_rows.append([None, 2, "Dome Camera - Auto Iris\n2MP WDR LightHunter IR Network Dome Camera", "EA", 12, 0, 0, 0, 0, 371, 4452, 430.36, 5164.32, None])
-    boq_rows.append([None, 3, "Bullet Camera\n2MP HD IR VF Bullet Network Camera", "EA", bullet_qty, 0, 0, 0, 0, 371, bullet_qty * 371, 430.36, bullet_qty * 430.36, None])
-    
-    # Section B: VMS, NVR & Storage
-    boq_rows.append([None, "B", "VMS, NVR & Storage", None, None, None, None, None, None, None, None, None, None, None])
-    boq_rows.append([None, 4, "VMS Software", "EA", 1, 0, 0, 0, 0, "Included", "Included", "Included", "Included", None])
-    boq_rows.append([None, 5, "UNV NVR516-64,Network Video Recorder", "EA", 1, 0, 0, 0, 0, 4350, 4350, 5046, 5046, None])
-    boq_rows.append([None, 6, "16TB HDD", "EA", 11, 0, 0, 0, 0, 2300, 25300, 2668, 29348, None])
-    
-    # Section C: Network Switches
-    boq_rows.append([None, "C", "Network Switches", None, None, None, None, None, None, None, None, None, None, None])
-    boq_rows.append([None, 7, "24Port POE Switch", "EA", 2, 0, 0, 0, 0, 985, 1970, 1142.6, 2285.2, None])
-    
-    # Section F: UPS System
-    boq_rows.append([None, "F", "UPS System", None, None, None, None, None, None, None, None, None, None, None])
-    boq_rows.append([None, 12, "3KVA UPS with Battery Pack for 60 Min. Backup", "EA", 1, 0, 0, 0, 0, 3950, 3950, 4582, 4582, None])
+    anpr_kpoi_items = [item for item in survey_items if item['Section'] == 7]
+
+    # Section A: Cameras and accessories (Only if input exists)
+    if camera_items or anpr_kpoi_items:
+        boq_rows.append([None, "A", "Cameras and accessories", None, None, None, None, None, None, None, None, None, None, None])
+        
+        for idx, cam in enumerate(camera_items, start=1):
+            desc = f"{cam['Item']}\n{cam['Description']}" if cam['Description'] else cam['Item']
+            boq_rows.append([None, idx, desc, cam['Unit'], cam['Qty'], 0, 0, 0, 0, 200, cam['Qty'] * 200, 232.0, cam['Qty'] * 232.0, None])
+            
+        for idx, ak in enumerate(anpr_kpoi_items, start=len(camera_items) + 1):
+            desc = f"{ak['Item']} System\n{ak['Description']}" if ak['Description'] else f"{ak['Item']} System"
+            boq_rows.append([None, idx, desc, ak['Unit'], ak['Qty'], 0, 0, 0, 0, 1500, ak['Qty'] * 1500, 1740.0, ak['Qty'] * 1740.0, None])
+
+    # Section B: VMS, NVR & Storage (Only if input exists)
+    if nvr_items or storage_items or vms_items:
+        boq_rows.append([None, "B", "VMS, NVR & Storage", None, None, None, None, None, None, None, None, None, None, None])
+        row_idx = 1
+        for nvr in nvr_items:
+            boq_rows.append([None, row_idx, f"NVR/Server: {nvr['Description']}", nvr['Unit'], nvr['Qty'], 0, 0, 0, 0, 4350, nvr['Qty'] * 4350, 5046, nvr['Qty'] * 5046, None])
+            row_idx += 1
+        for stor in storage_items:
+            boq_rows.append([None, row_idx, f"Storage: {stor['Description']}", stor['Unit'], stor['Qty'], 0, 0, 0, 0, 2300, stor['Qty'] * 2300, 2668, stor['Qty'] * 2668, None])
+            row_idx += 1
+
+    # Section C: Network Switches (Only if input exists)
+    if network_items:
+        boq_rows.append([None, "C", "Network Switches", None, None, None, None, None, None, None, None, None, None, None])
+        for idx, net in enumerate(network_items, start=1):
+            boq_rows.append([None, idx, f"{net['Item']}: {net['Description']}", net['Unit'], net['Qty'], 0, 0, 0, 0, 985, net['Qty'] * 985, 1142.6, net['Qty'] * 1142.6, None])
+
+    # Section F: UPS System (Only if input exists)
+    if ups_items:
+        boq_rows.append([None, "F", "UPS System", None, None, None, None, None, None, None, None, None, None, None])
+        for idx, ups in enumerate(ups_items, start=1):
+            boq_rows.append([None, idx, f"{ups['Item']}: {ups['Description']}", ups['Unit'], ups['Qty'], 0, 0, 0, 0, 3950, ups['Qty'] * 3950, 4582, ak['Qty'] * 4582 if 'ak' in locals() else 4582, None])
 
     df_boq = pd.DataFrame(boq_rows, columns=[
         "Unnamed: 0", "No", "Product Description", "UOM", "Qty", 
@@ -97,28 +115,10 @@ def generate_master_boq_excel(survey_items):
         "Unit Price (QAR)", "Total Price (QAR)", "Sell Unit Price (QAR)", "Sell Total Price (QAR)", "Remarks"
     ])
 
-    # 2. Build Storage Sheet
-    storage_rows = [
-        ["PROJECT", "CCTV Site Survey Extraction", None, None, None, None, "REQUIRED STORAGE - TB", None, 90.1, None, None, None],
-        ["STORAGE TYPE", "UNV NVR516-64 - Network Video Recorder", None, None, None, None, "AVAILABLE STORAGE - TB", None, 130.95, None, None, None],
-        ["TOTAL HDD - 16TB", 11, None, None, None, None, "OVERALL STORAGE LOAD", None, 0.68, None, None, None],
-        ["TOTAL CAMERA", dome_qty + bullet_qty, None, None, None, None, None, None, None, None, None, None]
-    ]
-    df_storage = pd.DataFrame(storage_rows)
+    # Supplementary sheets
+    df_storage = pd.DataFrame([["PROJECT", "CCTV Survey Extraction", None], ["STATUS", "Parsed strictly from input", None]])
+    df_ups = pd.DataFrame([["ESTIMATED UPS", None], ["STATUS", "Parsed strictly from input", None]])
 
-    # 3. Build UPS Sheet
-    ups_rows = [
-        ["ESTIMATED UPS CALCULATION - MDF", None, None, None, None, None, None, None, "UPS KVA"],
-        ["PROPOSED UPS", None, None, None, None, None, None, None, 3],
-        ["No", "Item Description", "Brand", "Availability", "Model No", "Quantity", "Watts", "Total Watts", None],
-        [1, "24\" Monitor", "TBD", None, "TBD", 1, 50, 50, None],
-        [2, "Workstation", "TBD", None, "TBD", 2, 250, 500, None],
-        [3, "24 Port Switch", "TBD", None, "TBD", 2, 370, 740, None],
-        [4, "NVR", "TBD", None, "TBD", 1, 100, 100, None]
-    ]
-    df_ups = pd.DataFrame(ups_rows)
-
-    # Write to Excel with exact sheet names from template
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_boq.to_excel(writer, sheet_name='BOQ', index=False)
         df_storage.to_excel(writer, sheet_name='Storage', index=False, header=False)
@@ -133,7 +133,7 @@ def generate_master_boq_excel(survey_items):
 st.set_page_config(page_title="Flora Tech BOQ Generator", layout="wide")
 
 st.title("Flora Technology - MOI CCTV BOQ Generator")
-st.markdown("Upload a filled **CCTV Site Visit Survey Form (.docx)**. The application reads Sections 6, 7, and 8 and outputs an Excel file matching the master BOQ format.")
+st.markdown("Upload your filled survey Word file. The app will extract **only** the exact items and quantities entered by the technician.")
 
 uploaded_file = st.file_uploader("Upload Site Survey Word Document (.docx)", type="docx")
 
@@ -141,22 +141,22 @@ if uploaded_file is not None:
     doc = Document(uploaded_file)
     extracted_items = parse_survey_tables(doc)
     
-    st.success("Word Document parsed successfully!")
+    st.success("File parsed successfully!")
     
     if extracted_items:
-        st.subheader("Extracted Data from Sections 6, 7, & 8")
+        st.subheader("Strictly Extracted Items from Survey")
         st.dataframe(pd.DataFrame(extracted_items))
     else:
-        st.warning("No explicit rows found in Sections 6, 7, or 8 tables. Default template quantities will be applied.")
+        st.warning("No quantities greater than 0 found in Sections 6, 7, or 8. Please ensure your survey table has quantities filled in.")
 
-    if st.button("Generate Master BOQ Excel"):
-        with st.spinner("Processing quantities and building master Excel structure..."):
+    if st.button("Generate Clean BOQ Excel"):
+        with st.spinner("Generating Excel matching exact input..."):
             excel_data = generate_master_boq_excel(extracted_items)
             
-            st.success("Excel BOQ generated successfully!")
+            st.success("Excel BOQ generated successfully without extra unrequested items!")
             st.download_button(
-                label="📥 Download Master BOQ Excel",
+                label="📥 Download Clean BOQ Excel",
                 data=excel_data,
-                file_name="POT27605 - Generated BOQ.xlsx",
+                file_name="POT27605 - Clean BOQ.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
